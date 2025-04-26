@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>WebXR Three-Lane Runner</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <style>
+    body { 
+      margin: 0; 
+      overflow: hidden;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    }
+    #overlay {
+      position: absolute;
+      top: 20px;
+      left: 20px;
+      z-index: 1;
+    }
+    #start-button {
+      padding: 12px 24px;
+      font-size: 18px;
+      background: rgba(72, 118, 255, 0.8);
+      color: white;
+      border: none;
+      border-radius: 30px;
+      box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+      cursor: pointer;
+      transition: all 0.3s ease;
+    }
+    #start-button:hover {
+      background: rgba(72, 118, 255, 1);
+      transform: translateY(-2px);
+      box-shadow: 0 6px 12px rgba(0,0,0,0.3);
+    }
+    #status {
+      margin-top: 15px;
+      font-size: 16px;
+      background: rgba(0, 0, 0, 0.5);
+      color: white;
+      padding: 10px 15px;
+      border-radius: 12px;
+      display: none;
+      backdrop-filter: blur(5px);
+      box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    }
+    #score {
+      position: absolute;
+      top: 20px;
+      right: 20px;
+      font-size: 20px;
+      color: white;
+      background: rgba(0, 0, 0, 0.5);
+      padding: 10px 15px;
+      border-radius: 12px;
+      backdrop-filter: blur(5px);
+    }
+  </style>
+</head>
+<body>
+  <div id="overlay">
+    <button id="start-button">Start AR Runner</button>
+    <div id="status"></div>
+  </div>
+  <div id="score">Score: 0</div>
+  
+  <script type="module">
+    import * as THREE from 'https://unpkg.com/three@0.150.1/build/three.module.js';
+    import { ARButton } from 'https://unpkg.com/three@0.150.1/examples/jsm/webxr/ARButton.js';
+
+    let camera, scene, renderer;
+    let controller;
+    let player;
+    let clock = new THREE.Clock();
+    let lanes = [-0.5, 0, 0.5]; // X positions for three lanes
+    let currentLane = 1; // Start in middle lane
+    let score = 0;
+    let gameStarted = false;
+    let playerSpeed = 0.1; // Speed along Z-axis
+    let objects = []; // Gems and obstacles
+    let lastSpawnZ = 0;
+    let nextSpawnDistance = 2;
+
+    init();
+
+    function init() {
+      // Scene setup
+      scene = new THREE.Scene();
+      camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 100);
+      camera.position.set(0, 1.6, 0); // Eye height
+
+      // Renderer setup
+      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+      renderer.setPixelRatio(window.devicePixelRatio);
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.xr.enabled = true;
+      renderer.setClearColor(0x000000, 0);
+      renderer.shadowMap.enabled = true;
+      document.body.appendChild(renderer.domElement);
+
+      // Lighting
+      const ambientLight = new THREE.AmbientLight(0x404040, 2);
+      scene.add(ambientLight);
+      const directionalLight = new THREE.DirectionalLight(0xffffff, 1.5);
+      directionalLight.position.set(1, 1, 1);
+      directionalLight.castShadow = true;
+      scene.add(directionalLight);
+
+      // Ground plane
+      const groundGeometry = new THREE.PlaneGeometry(10, 100);
+      const groundMaterial = new THREE.MeshStandardMaterial({ color: 0x555555 });
+      const ground = new THREE.Mesh(groundGeometry, groundMaterial);
+      ground.rotation.x = -Math.PI / 2;
+      ground.position.y = -0.1;
+      ground.receiveShadow = true;
+      scene.add(ground);
+
+      // Lane indicators
+      for (let x of lanes) {
+        const laneGeometry = new THREE.PlaneGeometry(0.3, 100);
+        const laneMaterial = new THREE.MeshBasicMaterial({ color: 0x333333 });
+        const lane = new THREE.Mesh(laneGeometry, laneMaterial);
+        lane.rotation.x = -Math.PI / 2;
+        lane.position.set(x, -0.09, 0);
+        scene.add(lane);
+      }
+
+      // Start button event
+      document.getElementById('start-button').addEventListener('click', () => {
+        if (navigator.xr) {
+          navigator.xr.isSessionSupported('immersive-ar').then((supported) => {
+            if (supported) {
+              const sessionInit = { 
+                requiredFeatures: ['local-floor'],
+                optionalFeatures: ['dom-overlay'], 
+                domOverlay: { root: document.body } 
+              };
+              navigator.xr.requestSession('immersive-ar', sessionInit).then(onSessionStarted);
+            } else {
+              updateStatus('WebXR AR session is not supported on this device.');
+            }
+          });
+        } else {
+          updateStatus('WebXR is not supported in this browser.');
+        }
+      });
+
+      window.addEventListener('resize', onWindowResize);
+    }
+
+    function updateStatus(message) {
+      const statusElement = document.getElementById('status');
+      statusElement.style.display = 'block';
+      statusElement.textContent = message;
+    }
+
+    function updateScore() {
+      document.getElementById('score').textContent = `Score: ${score}`;
+    }
+
+    function onWindowResize() {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    function onSessionStarted(session) {
+      renderer.xr.setReferenceSpaceType('local-floor');
+      renderer.xr.setSession(session);
+      document.getElementById('start-button').style.display = 'none';
+      updateStatus('Game starting... Move right controller left/right to switch lanes.');
+      
+      createPlayer();
+      setupController(session);
+      renderer.setAnimationLoop(render);
+      session.addEventListener('end', onSessionEnd);
+    }
+
+    function onSessionEnd() {
+      updateStatus('Game ended. Restart to play again.');
+      document.getElementById('start-button').style.display = 'block';
+      gameStarted = false;
+      score = 0;
+      updateScore();
+      objects.forEach(obj => scene.remove(obj));
+      objects = [];
+      lastSpawnZ = 0;
+      nextSpawnDistance = 2;
+    }
+
+    function createPlayer() {
+      const geometry = new THREE.BoxGeometry(0.2, 0.2, 0.2);
+      const material = new THREE.MeshStandardMaterial({ color: 0x4876FF });
+      player = new THREE.Mesh(geometry, material);
+      player.position.set(lanes[currentLane], 0.1, -0.5);
+      player.castShadow = true;
+      scene.add(player);
+    }
+
+    function setupController(session) {
+      controller = renderer.xr.getController(1); // Right controller
+      controller.addEventListener('connected', (event) => {
+        if (event.data.handedness === 'right') {
+          updateStatus('Right controller connected. Move left/right to switch lanes.');
+          gameStarted = true;
+        }
+      });
+
+      const controllerGeometry = new THREE.CylinderGeometry(0.01, 0.02, 0.1, 16);
+      const controllerMaterial = new THREE.MeshStandardMaterial({ color: 0xFF4500 });
+      const controllerMesh = new THREE.Mesh(controllerGeometry, controllerMaterial);
+      controllerMesh.rotation.x = Math.PI / 2;
+      controller.add(controllerMesh);
+      scene.add(controller);
+    }
+
+    function spawnObject() {
+      const laneIndex = Math.floor(Math.random() * 3);
+      const isGem = Math.random() < 0.7; // 70% chance for gem
+      const geometry = isGem ? new THREE.SphereGeometry(0.05, 16, 16) : new THREE.BoxGeometry(0.2, 0.2, 0.2);
+      const material = new THREE.MeshStandardMaterial({
+        color: isGem ? 0x00ff00 : 0xff0000,
+        emissive: isGem ? 0x00ff00 : 0x000000,
+        emissiveIntensity: isGem ? 0.5 : 0
+      });
+      const obj = new THREE.Mesh(geometry, material);
+      obj.position.set(lanes[laneIndex], 0.1, lastSpawnZ - 10);
+      obj.userData = { isGem, laneIndex };
+      obj.castShadow = true;
+      scene.add(obj);
+      objects.push(obj);
+    }
+
+    function checkCollisions() {
+      const playerBox = new THREE.Box3().setFromObject(player);
+      objects.forEach((obj, index) => {
+        const objBox = new THREE.Box3().setFromObject(obj);
+        if (playerBox.intersectsBox(objBox)) {
+          if (obj.userData.isGem) {
+            score += 10;
+            updateScore();
+            scene.remove(obj);
+            objects.splice(index, 1);
+          } else {
+            // Hit obstacle: end game
+            updateStatus('Hit obstacle! Game over.');
+            gameStarted = false;
+            document.getElementById('start-button').style.display = 'block';
+          }
+        }
+      });
+    }
+
+    function updatePlayerLane() {
+      if (!controller || !gameStarted) return;
+      const controllerPos = new THREE.Vector3();
+      controller.getWorldPosition(controllerPos);
+      // Use controller's X position relative to player
+      const relativeX = controllerPos.x - player.position.x;
+      if (relativeX < -0.2 && currentLane > 0) {
+        currentLane--;
+      } else if (relativeX > 0.2 && currentLane < 2) {
+        currentLane++;
+      }
+      player.position.x = lanes[currentLane];
+    }
+
+    function render(timestamp, frame) {
+      if (frame && gameStarted) {
+        const delta = clock.getDelta();
+        // Move player and camera forward
+        player.position.z -= playerSpeed;
+        camera.position.z = player.position.z + 0.5;
+        camera.position.y = 1.6;
+
+        // Update ground and lanes to follow
+        scene.children.forEach(child => {
+          if (child.type === 'Mesh' && child.geometry.type === 'PlaneGeometry') {
+            child.position.z = player.position.z;
+          }
+        });
+
+        // Spawn new objects
+        if (player.position.z < lastSpawnZ - nextSpawnDistance) {
+          spawnObject();
+          lastSpawnZ = player.position.z;
+          nextSpawnDistance = 1.5 + Math.random() * 2;
+        }
+
+        // Update objects and check collisions
+        objects.forEach((obj, index) => {
+          if (obj.position.z > player.position.z + 2) {
+            scene.remove(obj);
+            objects.splice(index, 1);
+          }
+        });
+        checkCollisions();
+
+        // Update player lane based on controller
+        updatePlayerLane();
+      }
+      renderer.render(scene, camera);
+    }
+  </script>
+</body>
+</html>
